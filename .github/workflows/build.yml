@@ -1,13 +1,19 @@
 name: Build
-on: [pull_request, push]
+on: [pull_request, push, workflow_dispatch]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Install C++ toolchain
         uses: numworks/setup-arm-toolchain@latest
       - name: Run make
         run: make
+      - name: Upload .nwa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonum
+          path: "**/*.nwa"
+          if-no-files-found: error
