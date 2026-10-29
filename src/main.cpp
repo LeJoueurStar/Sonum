@@ -291,7 +291,7 @@ void eadk_main() {
     drawBuildings();
     drawSonic();
     drawHud();
-    Display::pushRect(Display::Rect(0, 0, SCREEN_W, SCREEN_H),
-                      reinterpret_cast<const Display::Color*>(fb));
+        Display::pushRect(Rect(0, 0, SCREEN_W, SCREEN_H),
+                      reinterpret_cast<const Color*>(fb));
   }
 }
