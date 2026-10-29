@@ -7,6 +7,9 @@
 #include "eadkpp.h"
 #include <stdint.h>
 
+const char eadk_app_name[] __attribute__((section(".rodata.eadk_app_name"))) = "Sonum";
+const uint32_t eadk_api_level __attribute__((section(".rodata.eadk_api_level"))) = 0;
+
 using namespace EADK;
 
 namespace {
@@ -283,7 +286,7 @@ void update(const Keyboard::State& kbd) {
 
 }  // namespace
 
-void eadk_main() {
+int main(int argc, char* argv[]) {
   while (true) {
     Keyboard::State kbd = Keyboard::scan();
     update(kbd);
