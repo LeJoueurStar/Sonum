@@ -64,7 +64,7 @@ float maxOf3(float a, float b, float c) {
   return m > c ? m : c;
 }
 
-// Écrit un pixel si il est dans la bande courante
+// Écrit un pixel seulement s'il est dans la bande courante
 inline void plot(int x, int y, uint16_t c) {
   if (x < 0 || x >= SCREEN_W) return;
   if (y < bandY0 || y >= bandY0 + BAND_H) return;
@@ -186,6 +186,126 @@ void addTri(Vec3 a, Vec3 b, Vec3 c, uint16_t col) {
 
 // Octaèdre : 8 triangles, ombrage plat selon l'orientation de chaque face
 void addOcta(Vec3 c, float hx, float hy, float hz, uint16_t col) {
-  for (int i = -1; i <= 1; i += 2)
-    for (int j = -1; j <= 1; j += 2)
+  for (int i = -1; i <= 1; i += 2) {
+    for (int j = -1; j <= 1; j += 2) {
       for (int k = -1; k <= 1; k += 2) {
+        float light = 0.62f + (i > 0 ? 0.18f : 0) + (j > 0 ? 0.2f : 0) + (k > 0 ? 0.06f : 0);
+        addTri({c.x + i * hx, c.y, c.z},
+               {c.x, c.y + j * hy, c.z},
+               {c.x, c.y, c.z + k * hz},
+               shade(col, light));
+      }
+    }
+  }
+}
+
+void buildSonic() {
+  triCount = 0;
+  float sx = sonicX;
+  float sz = camZ + 6.0f;
+  float by = sonicY;
+  const uint16_t BLUE = rgb(30, 112, 224);
+  const uint16_t DBLUE = rgb(20, 80, 170);
+  const uint16_t RED = rgb(220, 40, 40);
+
+  addOcta({sx, by + 1.0f, sz}, 0.7f, 0.8f, 0.7f, BLUE);           // corps
+  addOcta({sx, by + 1.85f, sz + 0.05f}, 0.5f, 0.45f, 0.5f, BLUE); // tête
+
+  // Piquants à l'arrière de la tête
+  float dxs[3] = {-0.45f, 0.0f, 0.45f};
+  for (int s = 0; s < 3; ++s) {
+    float tipY = by + 2.7f + (s == 1 ? 0.2f : 0.0f);
+    addTri({sx - 0.4f, by + 2.0f, sz - 0.3f},
+           {sx + 0.4f, by + 2.0f, sz - 0.3f},
+           {sx + dxs[s], tipY, sz - 0.9f},
+           DBLUE);
+  }
+
+  // Chaussures
+  addOcta({sx - 0.35f, by + 0.18f, sz + 0.1f}, 0.3f, 0.18f, 0.35f, RED);
+  addOcta({sx + 0.35f, by + 0.18f, sz + 0.1f}, 0.3f, 0.18f, 0.35f, RED);
+}
+
+void drawSonic() {
+  buildSonic();
+  Proj pr[64];
+  int n = 0;
+  for (int t = 0; t < triCount; ++t) {
+    Vec3 v[3] = {tris[t].a, tris[t].b, tris[t].c};
+    Proj item;
+    bool ok = true;
+    float dsum = 0;
+    for (int i = 0; i < 3; ++i) {
+      float dz;
+      if (!project(v[i].x, v[i].y, v[i].z, item.p[i], dz)) { ok = false; break; }
+      dsum += dz;
+    }
+    if (!ok) continue;
+    item.depth = dsum / 3.0f;
+    item.col = tris[t].col;
+    pr[n++] = item;
+  }
+  // Tri par profondeur décroissante (les plus loin en premier)
+  for (int i = 1; i < n; ++i) {
+    Proj key = pr[i];
+    int j = i - 1;
+    while (j >= 0 && pr[j].depth < key.depth) {
+      pr[j + 1] = pr[j];
+      --j;
+    }
+    pr[j + 1] = key;
+  }
+  for (int i = 0; i < n; ++i)
+    fillTri(pr[i].p[0], pr[i].p[1], pr[i].p[2], pr[i].col);
+}
+
+void drawHud() {
+  int len = (int)(speed / VMAX * 150.0f);
+  fillRect(4, 4, 4 + len, 10, rgb(255, 210, 0));
+}
+
+void update(const Keyboard::State& kbd) {
+  if (kbd.keyDown(Keyboard::Key::Up)) speed += 0.03f;
+  else speed *= 0.993f;
+  if (kbd.keyDown(Keyboard::Key::Down)) speed *= 0.93f;
+  speed = clampf(speed, 0.0f, VMAX);
+
+  if (kbd.keyDown(Keyboard::Key::Left)) sonicX -= 0.12f;
+  if (kbd.keyDown(Keyboard::Key::Right)) sonicX += 0.12f;
+  sonicX = clampf(sonicX, -3.4f, 3.4f);
+
+  if (kbd.keyDown(Keyboard::Key::OK) && onGround) {
+    vy = 0.42f;
+    onGround = false;
+  }
+  if (!onGround) {
+    vy -= 0.03f;
+    sonicY += vy;
+    if (sonicY <= 0) {
+      sonicY = 0;
+      vy = 0;
+      onGround = true;
+    }
+  }
+
+  camZ += speed;
+  camX += (sonicX * 0.6f - camX) * 0.1f;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+  while (true) {
+    Keyboard::State kbd = Keyboard::scan();
+    update(kbd);
+    for (int b = 0; b < SCREEN_H / BAND_H; ++b) {
+      bandY0 = b * BAND_H;
+      drawSkyAndGround();
+      drawBuildings();
+      drawSonic();
+      drawHud();
+      Display::pushRect(Rect(0, bandY0, SCREEN_W, BAND_H),
+                        reinterpret_cast<const Color*>(fb));
+    }
+  }
+}
