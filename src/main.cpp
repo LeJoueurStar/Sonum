@@ -4,7 +4,7 @@
 // Si le build indique une erreur sur un #include, garde les #include d'origine
 // du modèle NumWorks et ajoute seulement #include <stdint.h>.
 
-#include <eadk.h>
+#include "eadkpp.h"
 #include <stdint.h>
 
 using namespace EADK;
