@@ -27,8 +27,8 @@ constexpr float CURVE_AMP = 7.0f;
 uint16_t fb[SCREEN_W * BAND_H];
 int bandY0 = 0;
 
-enum class Screen { Title, Play, Goal };
-Screen screen = Screen::Title;
+enum class GameScreen { Title, Play, Goal };
+GameScreen screen = GameScreen::Title;
 
 struct Vec3 { float x, y, z; };
 struct P2 { float x, y; };
@@ -512,7 +512,7 @@ void updatePlay(const Keyboard::State& kbd, bool okPressed) {
   camX += (target - camX) * 0.1f;
 
   collectRings();
-  if (camZ >= LEVEL_LENGTH) screen = Screen::Goal;
+  if (camZ >= LEVEL_LENGTH) screen = GameScreen::Goal;
 }
 
 void drawTitle() {
@@ -539,23 +539,23 @@ int main(int argc, char* argv[]) {
     bool okPressed = okDown && !okPrev;
     okPrev = okDown;
 
-    if (screen == Screen::Title) {
+    if (screen == GameScreen::Title) {
       if (okPressed) {
         resetLevel();
-        screen = Screen::Play;
+        screen = GameScreen::Play;
       }
-    } else if (screen == Screen::Play) {
+    } else if (screen == GameScreen::Play) {
       updatePlay(kbd, okPressed);
     } else {
-      if (okPressed) screen = Screen::Title;
+      if (okPressed) screen = GameScreen::Title;
     }
 
     for (int b = 0; b < SCREEN_H / BAND_H; ++b) {
       bandY0 = b * BAND_H;
       drawSkyAndGround();
-      if (screen == Screen::Title) {
+      if (screen == GameScreen::Title) {
         drawTitle();
-      } else if (screen == Screen::Play) {
+      } else if (screen == GameScreen::Play) {
         drawBuildings();
         drawRings();
         drawSonic();
