@@ -18,10 +18,17 @@ constexpr float ROAD_HALF = 4.0f;
 constexpr float VMAX = 3.0f;
 constexpr float BUILD_SPACING = 16.0f;
 constexpr float DRAW_DIST = 260.0f;
+constexpr float RING_SPACING = 12.0f;
+constexpr float LEVEL_LENGTH = 1200.0f;
+constexpr float CURVE_AMP = 7.0f;
+
 
 // Tampon d'une seule bande horizontale (320 x 20 pixels, 12,8 Ko)
 uint16_t fb[SCREEN_W * BAND_H];
 int bandY0 = 0;
+
+enum class Screen { Title, Play, Goal };
+Screen screen = Screen::Title;
 
 struct Vec3 { float x, y, z; };
 struct P2 { float x, y; };
@@ -30,12 +37,21 @@ struct Proj { P2 p[3]; float depth; uint16_t col; };
 
 // État du jeu
 float camX = 0, camZ = 0;
-float sonicX = 0, sonicY = 0, vy = 0, speed = 0;
+float sonicX = 0, sonicY = 0, vy = 0, speed = 0, phase = 0;
 bool onGround = true;
+int rings = 0;
+int collected[64];   // collected[n & 63] == n : l'anneau n est ramassé
 
 constexpr uint16_t rgb(int r, int g, int b) {
   return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3));
 }
+const uint16_t BLUE = rgb(30, 112, 224);
+const uint16_t DBLUE = rgb(20, 80, 170);
+const uint16_t RED = rgb(220, 40, 40);
+const uint16_t WHITE = rgb(255, 255, 255);
+const uint16_t YELLOW = rgb(255, 210, 0);
+const uint16_t GREEN = rgb(80, 220, 80);
+const uint16_t DARK = rgb(20, 20, 40);
 
 uint16_t shade(uint16_t c, float k) {
   int r = ((c >> 11) & 31) << 3;
@@ -64,6 +80,17 @@ float maxOf3(float a, float b, float c) {
   return m > c ? m : c;
 }
 
+// Onde triangulaire de période 1, valeurs dans [-1, 1]. Pour x >= 0. Pas de libm.
+float tri(float x) {
+  float f = x - (float)(int)x;
+  return f < 0.5f ? 4.0f * f - 1.0f : 3.0f - 4.0f * f;
+}
+
+// Décalage latéral de la route selon la profondeur : virages doux
+float roadCenter(float z) {
+  return CURVE_AMP * tri(z * 0.004f);
+}
+
 // Écrit un pixel seulement s'il est dans la bande courante
 inline void plot(int x, int y, uint16_t c) {
   if (x < 0 || x >= SCREEN_W) return;
@@ -90,27 +117,99 @@ void fillRect(int x0, int y0, int x1, int y1, uint16_t c) {
       fb[(y - bandY0) * SCREEN_W + x] = c;
 }
 
-float edge(P2 a, P2 b, float px, float py) {
-  return (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+// Police 3x5 : chaque ligne est un motif de 3 bits (bit de gauche = colonne 0)
+const char FONT_CHARS[] = "ABDEGHILMNOPRSTUVXY0123456789-: ";
+const uint8_t FONT[][5] = {
+  {0b010,0b101,0b111,0b101,0b101}, // A
+  {0b110,0b101,0b110,0b101,0b110}, // B
+  {0b110,0b101,0b101,0b101,0b110}, // D
+  {0b111,0b100,0b110,0b100,0b111}, // E
+  {0b111,0b100,0b101,0b101,0b111}, // G
+  {0b101,0b101,0b111,0b101,0b101}, // H
+  {0b111,0b010,0b010,0b010,0b111}, // I
+  {0b100,0b100,0b100,0b100,0b111}, // L
+  {0b101,0b111,0b111,0b101,0b101}, // M
+  {0b101,0b111,0b111,0b111,0b101}, // N
+  {0b111,0b101,0b101,0b101,0b111}, // O
+  {0b110,0b101,0b110,0b100,0b100}, // P
+  {0b110,0b101,0b110,0b101,0b101}, // R
+  {0b111,0b100,0b111,0b001,0b111}, // S
+  {0b111,0b010,0b010,0b010,0b010}, // T
+  {0b101,0b101,0b101,0b101,0b111}, // U
+  {0b101,0b101,0b101,0b101,0b010}, // V
+  {0b101,0b101,0b010,0b101,0b101}, // X
+  {0b101,0b101,0b010,0b010,0b010}, // Y
+  {0b111,0b101,0b101,0b101,0b111}, // 0
+  {0b010,0b110,0b010,0b010,0b111}, // 1
+  {0b111,0b001,0b111,0b100,0b111}, // 2
+  {0b111,0b001,0b111,0b001,0b111}, // 3
+  {0b101,0b101,0b111,0b001,0b001}, // 4
+  {0b111,0b100,0b111,0b001,0b111}, // 5
+  {0b111,0b100,0b111,0b101,0b111}, // 6
+  {0b111,0b001,0b010,0b010,0b010}, // 7
+  {0b111,0b101,0b111,0b101,0b111}, // 8
+  {0b111,0b101,0b111,0b001,0b111}, // 9
+  {0b000,0b000,0b111,0b000,0b000}, // -
+  {0b000,0b010,0b000,0b010,0b000}, // :
+  {0b000,0b000,0b000,0b000,0b000}, // espace
+};
+
+const uint8_t* glyph(char c) {
+  for (int i = 0; FONT_CHARS[i]; ++i)
+    if (FONT_CHARS[i] == c) return FONT[i];
+  return FONT[31];
 }
 
-void fillTri(P2 a, P2 b, P2 c, uint16_t col) {
-  float lo = (float)bandY0;
-  float hi = (float)(bandY0 + BAND_H - 1);
-  int x0 = (int)clampf(minOf3(a.x, b.x, c.x), 0.0f, SCREEN_W - 1.0f);
-  int x1 = (int)clampf(maxOf3(a.x, b.x, c.x), 0.0f, SCREEN_W - 1.0f);
-  int y0 = (int)clampf(minOf3(a.y, b.y, c.y), lo, hi);
-  int y1 = (int)clampf(maxOf3(a.y, b.y, c.y), lo, hi);
-  for (int y = y0; y <= y1; ++y) {
-    for (int x = x0; x <= x1; ++x) {
-      float px = x + 0.5f, py = y + 0.5f;
-      float w0 = edge(b, c, px, py);
-      float w1 = edge(c, a, px, py);
-      float w2 = edge(a, b, px, py);
-      bool inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
-      if (inside) plot(x, y, col);
-    }
+void drawText(int x, int y, const char* s, int scale, uint16_t col) {
+  for (; *s; ++s) {
+    const uint8_t* g = glyph(*s);
+    for (int row = 0; row < 5; ++row)
+      for (int cl = 0; cl < 3; ++cl)
+        if (g[row] & (4 >> cl)) {
+          int px = x + cl * scale;
+          int py = y + row * scale;
+          fillRect(px, py, px + scale - 1, py + scale - 1, col);
+        }
+    x += 4 * scale;
   }
+}
+
+// Texte centré avec une ombre pour rester lisible sur le décor
+void drawTextCentered(int y, const char* s, int scale, uint16_t col) {
+  int len = 0;
+  while (s[len]) ++len;
+  int w = len * 4 * scale - scale;
+  int x = (SCREEN_W - w) / 2;
+  drawText(x + 2, y + 2, s, scale, DARK);
+  drawText(x, y, s, scale, col);
+}
+
+void intToStr(int v, char* out) {
+  char tmp[12];
+  int n = 0;
+  if (v == 0) tmp[n++] = '0';
+  while (v > 0 && n < 11) {
+    tmp[n++] = (char)('0' + v % 10);
+    v /= 10;
+  }
+  int i = 0;
+  while (n > 0) out[i++] = tmp[--n];
+  out[i] = 0;
+}
+
+// Construit "ANNEAUX 12"
+void ringText(char* out) {
+  const char* label = "ANNEAUX ";
+  int i = 0;
+  while (label[i]) {
+    out[i] = label[i];
+    ++i;
+  }
+  char num[12];
+  intToStr(rings, num);
+  int j = 0;
+  while (num[j]) out[i++] = num[j++];
+  out[i] = 0;
 }
 
 // Ciel et route pour les lignes de la bande courante
@@ -124,8 +223,9 @@ void drawSkyAndGround() {
       float dz = FOCAL * CAM_HEIGHT / (y - HORIZON + 0.5f);
       float worldZ = camZ + dz;
       int stripe = ((int)(worldZ / 4.0f)) & 1;
-      float lx = SCREEN_W / 2 + FOCAL * (-ROAD_HALF - camX) / dz;
-      float rx = SCREEN_W / 2 + FOCAL * (ROAD_HALF - camX) / dz;
+      float cxw = roadCenter(worldZ);
+      float lx = SCREEN_W / 2 + FOCAL * (cxw - ROAD_HALF - camX) / dz;
+      float rx = SCREEN_W / 2 + FOCAL * (cxw + ROAD_HALF - camX) / dz;
       uint16_t road = stripe ? rgb(96, 96, 104) : rgb(84, 84, 92);
       uint16_t grass = stripe ? rgb(60, 150, 70) : rgb(50, 135, 60);
       for (int x = 0; x < SCREEN_W; ++x)
@@ -142,12 +242,13 @@ uint32_t hashBuilding(int n, int side) {
   return h;
 }
 
-// Bâtiments des deux côtés, du plus loin au plus proche
+// Bâtiments des deux côtés, suivant la courbe de la route
 void drawBuildings() {
   int nFar = (int)((camZ + DRAW_DIST) / BUILD_SPACING);
   int nNear = (int)(camZ / BUILD_SPACING);
   for (int n = nFar; n >= nNear; --n) {
     float z = n * BUILD_SPACING;
+    float cx = roadCenter(z);
     for (int side = -1; side <= 1; side += 2) {
       uint32_t h = hashBuilding(n, side);
       float hgt = 7.0f + (float)(h % 18);
@@ -155,10 +256,10 @@ void drawBuildings() {
 
       P2 bottomIn, topIn, bottomOut;
       float dz;
-      if (!project(side * 6.0f, 0, z, bottomIn, dz)) continue;
+      if (!project(cx + side * 6.0f, 0, z, bottomIn, dz)) continue;
       if (dz > DRAW_DIST) continue;
-      project(side * 6.0f, hgt, z, topIn, dz);
-      project(side * 10.0f, 0, z, bottomOut, dz);
+      project(cx + side * 6.0f, hgt, z, topIn, dz);
+      project(cx + side * 10.0f, 0, z, bottomOut, dz);
 
       int x0 = (int)minOf3(bottomIn.x, bottomOut.x, bottomIn.x);
       int x1 = (int)maxOf3(bottomIn.x, bottomOut.x, bottomIn.x);
@@ -173,6 +274,44 @@ void drawBuildings() {
           fillRect(x, y0 + (y1 - y0) / 4, x + 1, y1 - (y1 - y0) / 4, win);
       }
     }
+  }
+}
+
+// Anneau : cercle jaune creux, dessiné seulement dans la bande courante
+void drawRing(float wx, float wy, float wz) {
+  P2 c;
+  float dz;
+  if (!project(wx, wy, wz, c, dz)) return;
+  if (dz > DRAW_DIST) return;
+  int ri = (int)(FOCAL * 0.9f / dz);
+  if (ri < 2) ri = 2;
+  int thick = ri / 3 + 1;
+  int cx = (int)c.x;
+  int cy = (int)c.y;
+  int y0 = cy - ri;
+  if (y0 < bandY0) y0 = bandY0;
+  int y1 = cy + ri;
+  if (y1 > bandY0 + BAND_H - 1) y1 = bandY0 + BAND_H - 1;
+  int outer = ri * ri;
+  int inner = (ri - thick) * (ri - thick);
+  for (int y = y0; y <= y1; ++y) {
+    int dy = y - cy;
+    for (int x = cx - ri; x <= cx + ri; ++x) {
+      int dx = x - cx;
+      int d2 = dx * dx + dy * dy;
+      if (d2 <= outer && d2 >= inner) plot(x, y, YELLOW);
+    }
+  }
+}
+
+void drawRings() {
+  int n0 = (int)(camZ / RING_SPACING);
+  int n1 = (int)((camZ + DRAW_DIST) / RING_SPACING);
+  for (int n = n1; n >= n0; --n) {
+    if (collected[n & 63] == n) continue;
+    float zr = n * RING_SPACING;
+    if (zr < camZ + 1.0f) continue;
+    drawRing(roadCenter(zr), 1.3f, zr);
   }
 }
 
@@ -199,31 +338,48 @@ void addOcta(Vec3 c, float hx, float hy, float hz, uint16_t col) {
   }
 }
 
+// Sonic : animation procédurale (course, rebond, boule en l'air)
 void buildSonic() {
   triCount = 0;
-  float sx = sonicX;
-  float sz = camZ + 6.0f;
-  float by = sonicY;
-  const uint16_t BLUE = rgb(30, 112, 224);
-  const uint16_t DBLUE = rgb(20, 80, 170);
-  const uint16_t RED = rgb(220, 40, 40);
+  const float sz = camZ + 6.0f;
+  const float sx = roadCenter(sz) + sonicX;
+  const float sy = sonicY;
+  const float k = speed / VMAX;
 
-  addOcta({sx, by + 1.0f, sz}, 0.7f, 0.8f, 0.7f, BLUE);           // corps
-  addOcta({sx, by + 1.85f, sz + 0.05f}, 0.5f, 0.45f, 0.5f, BLUE); // tête
+  if (!onGround) {
+    // En l'air : boule qui semble tourner
+    float w = tri(phase * 0.8f + 0.5f);
+    if (w < 0) w = -w;
+    addOcta({sx, sy + 0.9f, sz}, 0.2f + 0.6f * w, 0.8f, 0.6f + 0.1f * w, BLUE);
+    return;
+  }
 
-  // Piquants à l'arrière de la tête
+  float bob = 0.03f * k * tri(phase * 2.0f);
+  float body = sy + 1.0f + bob;
+  float head = sy + 1.85f + bob;
+
+  addOcta({sx, body, sz}, 0.7f, 0.8f, 0.7f, BLUE);           // corps
+  addOcta({sx, head, sz + 0.05f}, 0.5f, 0.45f, 0.5f, BLUE);  // tête
+
+  // Piquants, vers l'arrière de la tête
   float dxs[3] = {-0.45f, 0.0f, 0.45f};
   for (int s = 0; s < 3; ++s) {
-    float tipY = by + 2.7f + (s == 1 ? 0.2f : 0.0f);
-    addTri({sx - 0.4f, by + 2.0f, sz - 0.3f},
-           {sx + 0.4f, by + 2.0f, sz - 0.3f},
-           {sx + dxs[s], tipY, sz - 0.9f},
+    float tipY = head + 0.85f + (s == 1 ? 0.2f : 0.0f);
+    addTri({sx - 0.4f, head, sz + 0.1f},
+           {sx + 0.4f, head, sz + 0.1f},
+           {sx + dxs[s], tipY, sz + 0.7f},
            DBLUE);
   }
 
-  // Chaussures
-  addOcta({sx - 0.35f, by + 0.18f, sz + 0.1f}, 0.3f, 0.18f, 0.35f, RED);
-  addOcta({sx + 0.35f, by + 0.18f, sz + 0.1f}, 0.3f, 0.18f, 0.35f, RED);
+  // Yeux, côté caméra (z plus petit)
+  addOcta({sx - 0.22f, head + 0.08f, sz - 0.42f}, 0.12f, 0.14f, 0.06f, WHITE);
+  addOcta({sx + 0.22f, head + 0.08f, sz - 0.42f}, 0.12f, 0.14f, 0.06f, WHITE);
+
+  // Chaussures : alternance gauche/droite pendant la course
+  float liftL = 0.14f * k * (tri(phase) + 1.0f) * 0.5f;
+  float liftR = 0.14f * k * (tri(phase + 0.5f) + 1.0f) * 0.5f;
+  addOcta({sx - 0.35f, sy + 0.18f + liftL, sz + 0.1f}, 0.3f, 0.18f, 0.35f, RED);
+  addOcta({sx + 0.35f, sy + 0.18f + liftR, sz + 0.1f}, 0.3f, 0.18f, 0.35f, RED);
 }
 
 void drawSonic() {
@@ -255,16 +411,78 @@ void drawSonic() {
     }
     pr[j + 1] = key;
   }
-  for (int i = 0; i < n; ++i)
-    fillTri(pr[i].p[0], pr[i].p[1], pr[i].p[2], pr[i].col);
+  for (int i = 0; i < n; ++i) {
+    P2 a = pr[i].p[0], b = pr[i].p[1], c = pr[i].p[2];
+    // Triangle rasterisé à la main : bords et intérieur, limités à la bande
+    float lo = (float)bandY0;
+    float hi = (float)(bandY0 + BAND_H - 1);
+    int x0 = (int)clampf(minOf3(a.x, b.x, c.x), 0.0f, SCREEN_W - 1.0f);
+    int x1 = (int)clampf(maxOf3(a.x, b.x, c.x), 0.0f, SCREEN_W - 1.0f);
+    int y0 = (int)clampf(minOf3(a.y, b.y, c.y), lo, hi);
+    int y1 = (int)clampf(maxOf3(a.y, b.y, c.y), lo, hi);
+    for (int y = y0; y <= y1; ++y) {
+      for (int x = x0; x <= x1; ++x) {
+        float px = x + 0.5f, py = y + 0.5f;
+        float w0 = (c.x - b.x) * (py - b.y) - (c.y - b.y) * (px - b.x);
+        float w1 = (a.x - c.x) * (py - c.y) - (a.y - c.y) * (px - c.x);
+        float w2 = (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+        bool inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+        if (inside) plot(x, y, pr[i].col);
+      }
+    }
+  }
+}
+
+// Ramassage des anneaux
+void collectRings() {
+  float sz = camZ + 6.0f;
+  float sx = roadCenter(sz) + sonicX;
+  int n0 = (int)(camZ / RING_SPACING);
+  for (int n = n0; n <= n0 + 2; ++n) {
+    float zr = n * RING_SPACING;
+    if (zr < sz - 1.5f || zr > sz + 1.5f) continue;
+    float dx = roadCenter(zr) - sx;
+    if (dx > 1.5f || dx < -1.5f) continue;
+    if (sonicY > 1.5f) continue;
+    if (collected[n & 63] == n) continue;
+    collected[n & 63] = n;
+    ++rings;
+  }
 }
 
 void drawHud() {
-  int len = (int)(speed / VMAX * 150.0f);
-  fillRect(4, 4, 4 + len, 10, rgb(255, 210, 0));
+  char buf[24];
+  ringText(buf);
+  drawText(7, 7, buf, 2, DARK);
+  drawText(5, 5, buf, 2, YELLOW);
+
+  // Barre de vitesse
+  fillRect(5, 30, 105, 36, DARK);
+  int len = (int)(speed / VMAX * 98.0f);
+  fillRect(6, 31, 6 + len, 35, WHITE);
+
+  // Progression du niveau
+  float pf = camZ / LEVEL_LENGTH;
+  if (pf > 1.0f) pf = 1.0f;
+  int pl = (int)(pf * 308.0f);
+  fillRect(5, 226, 315, 232, DARK);
+  fillRect(7, 228, 7 + pl, 230, GREEN);
 }
 
-void update(const Keyboard::State& kbd) {
+void resetLevel() {
+  camZ = 0;
+  camX = roadCenter(12.0f);
+  sonicX = 0;
+  sonicY = 0;
+  vy = 0;
+  speed = 0;
+  phase = 0;
+  onGround = true;
+  rings = 0;
+  for (int i = 0; i < 64; ++i) collected[i] = -1;
+}
+
+void updatePlay(const Keyboard::State& kbd, bool okPressed) {
   if (kbd.keyDown(Keyboard::Key::Up)) speed += 0.03f;
   else speed *= 0.993f;
   if (kbd.keyDown(Keyboard::Key::Down)) speed *= 0.93f;
@@ -272,9 +490,9 @@ void update(const Keyboard::State& kbd) {
 
   if (kbd.keyDown(Keyboard::Key::Left)) sonicX -= 0.12f;
   if (kbd.keyDown(Keyboard::Key::Right)) sonicX += 0.12f;
-  sonicX = clampf(sonicX, -3.4f, 3.4f);
+  sonicX = clampf(sonicX, -ROAD_HALF * 0.8f, ROAD_HALF * 0.8f);
 
-  if (kbd.keyDown(Keyboard::Key::OK) && onGround) {
+  if (okPressed && onGround) {
     vy = 0.42f;
     onGround = false;
   }
@@ -288,22 +506,63 @@ void update(const Keyboard::State& kbd) {
     }
   }
 
+  phase += speed * 0.06f;
   camZ += speed;
-  camX += (sonicX * 0.6f - camX) * 0.1f;
+  float target = roadCenter(camZ + 12.0f) + sonicX * 0.6f;
+  camX += (target - camX) * 0.1f;
+
+  collectRings();
+  if (camZ >= LEVEL_LENGTH) screen = Screen::Goal;
+}
+
+void drawTitle() {
+  drawTextCentered(40, "SONUM", 6, YELLOW);
+  drawTextCentered(150, "APPUYEZ SUR OK", 2, WHITE);
+}
+
+void drawGoal() {
+  drawTextCentered(50, "NIVEAU TERMINE", 3, WHITE);
+  char buf[24];
+  ringText(buf);
+  drawTextCentered(110, buf, 3, YELLOW);
+  drawTextCentered(190, "APPUYEZ SUR OK", 2, WHITE);
 }
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  bool okPrev = false;
+  for (int i = 0; i < 64; ++i) collected[i] = -1;
   while (true) {
     Keyboard::State kbd = Keyboard::scan();
-    update(kbd);
+    bool okDown = kbd.keyDown(Keyboard::Key::OK);
+    bool okPressed = okDown && !okPrev;
+    okPrev = okDown;
+
+    if (screen == Screen::Title) {
+      if (okPressed) {
+        resetLevel();
+        screen = Screen::Play;
+      }
+    } else if (screen == Screen::Play) {
+      updatePlay(kbd, okPressed);
+    } else {
+      if (okPressed) screen = Screen::Title;
+    }
+
     for (int b = 0; b < SCREEN_H / BAND_H; ++b) {
       bandY0 = b * BAND_H;
       drawSkyAndGround();
-      drawBuildings();
-      drawSonic();
-      drawHud();
+      if (screen == Screen::Title) {
+        drawTitle();
+      } else if (screen == Screen::Play) {
+        drawBuildings();
+        drawRings();
+        drawSonic();
+        drawHud();
+      } else {
+        drawGoal();
+      }
       Display::pushRect(Rect(0, bandY0, SCREEN_W, BAND_H),
                         reinterpret_cast<const Color*>(fb));
     }
